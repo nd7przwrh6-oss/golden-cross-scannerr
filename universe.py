@@ -1,27 +1,57 @@
-"""Fetch current index constituent lists (S&P 500, Nasdaq-100, Dow 30, TSX 60).
+"""Index constituent lists (S&P 500, Nasdaq-100, Dow 30, TSX 60).
 
-Scrapes Wikipedia's constituent tables. These pages are maintained close to
-real-time by editors when index providers announce changes, which is good
-enough for a daily scan (we're not trading on index-membership latency).
+Constituents are bundled as static JSON in data/ rather than scraped live
+from Wikipedia on every run: the scheduled cloud routine that runs this
+script executes behind an egress proxy that only allows a small allowlist
+of hosts (package registries, GitHub, Yahoo Finance) and blocks
+en.wikipedia.org, so live scraping isn't viable there. Index membership
+also doesn't change often enough to justify a live fetch on every run.
+
+To refresh the bundled lists (run locally, NOT from the cloud routine,
+since it needs Wikipedia access):
+    python universe.py --refresh
 """
 from __future__ import annotations
 
-import io
+import json
+from pathlib import Path
 
-import pandas as pd
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; golden-cross-scanner/1.0)"}
+INDEX_FILES = {
+    "S&P 500": "sp500.json",
+    "Nasdaq-100": "nasdaq100.json",
+    "Dow 30": "dow30.json",
+    "TSX 60": "tsx60.json",
+}
 
 
-def _read_tables(url: str) -> list[pd.DataFrame]:
+def get_universe() -> dict[str, set[str]]:
+    """Return {ticker: {index_names it belongs to}} from the bundled JSON files."""
+    universe: dict[str, set[str]] = {}
+    for name, filename in INDEX_FILES.items():
+        path = DATA_DIR / filename
+        tickers = json.loads(path.read_text())
+        for tk in tickers:
+            universe.setdefault(tk, set()).add(name)
+    return universe
+
+
+# --- Live scraping, used only to refresh the bundled JSON (run locally) ---
+
+def _read_tables(url: str):
+    import io
+
+    import pandas as pd
     import requests
 
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; golden-cross-scanner/1.0)"}
+    resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
     return pd.read_html(io.StringIO(resp.text))
 
 
-def _find_table(tables: list[pd.DataFrame], required_cols: list[str]) -> pd.DataFrame:
+def _find_table(tables, required_cols: list[str]):
     for t in tables:
         cols = [str(c).strip().lower() for c in t.columns]
         if all(any(rc in c for c in cols) for rc in required_cols):
@@ -29,7 +59,7 @@ def _find_table(tables: list[pd.DataFrame], required_cols: list[str]) -> pd.Data
     raise ValueError(f"No table found with columns matching {required_cols}")
 
 
-def _col(t: pd.DataFrame, name: str) -> str:
+def _col(t, name: str) -> str:
     for c in t.columns:
         if name in str(c).strip().lower():
             return c
@@ -40,67 +70,58 @@ def _normalize(sym: str) -> str:
     return str(sym).strip().replace(".", "-").replace("\n", "")
 
 
-def _symbols(t: pd.DataFrame, col_hint: str) -> list[str]:
+def _symbols(t, col_hint: str) -> list[str]:
     col = _col(t, col_hint)
     return [_normalize(s) for s in t[col].dropna().tolist()]
 
 
-def get_sp500() -> set[str]:
+def refresh_sp500() -> list[str]:
     tables = _read_tables("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
     t = _find_table(tables, ["symbol"])
-    return set(_symbols(t, "symbol"))
+    return sorted(set(_symbols(t, "symbol")))
 
 
-def get_nasdaq100() -> set[str]:
+def refresh_nasdaq100() -> list[str]:
     tables = _read_tables("https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies")
     t = _find_table(tables, ["ticker"])
-    return set(_symbols(t, "ticker"))
+    return sorted(set(_symbols(t, "ticker")))
 
 
-def get_dow30() -> set[str]:
+def refresh_dow30() -> list[str]:
     tables = _read_tables("https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies")
     t = _find_table(tables, ["symbol"])
-    return set(_symbols(t, "symbol"))
+    return sorted(set(_symbols(t, "symbol")))
 
 
-def get_tsx60() -> set[str]:
+def refresh_tsx60() -> list[str]:
     tables = _read_tables("https://en.wikipedia.org/wiki/S%26P/TSX_60")
     t = _find_table(tables, ["symbol"])
     raw = set(_symbols(t, "symbol"))
-    # Toronto Stock Exchange tickers need the .TO suffix for Yahoo Finance.
-    return {f"{s}.TO" if not s.endswith(".TO") else s for s in raw}
+    return sorted({f"{s}.TO" if not s.endswith(".TO") else s for s in raw})
 
 
-def get_universe() -> dict[str, set[str]]:
-    """Return {ticker: {index_names it belongs to}}."""
-    sources = {
-        "S&P 500": get_sp500,
-        "Nasdaq-100": get_nasdaq100,
-        "Dow 30": get_dow30,
-        "TSX 60": get_tsx60,
+def refresh_all() -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    fns = {
+        "sp500.json": refresh_sp500,
+        "nasdaq100.json": refresh_nasdaq100,
+        "dow30.json": refresh_dow30,
+        "tsx60.json": refresh_tsx60,
     }
-    universe: dict[str, set[str]] = {}
-    errors = []
-    for name, fn in sources.items():
-        try:
-            tickers = fn()
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{name}: {exc}")
-            continue
-        for tk in tickers:
-            universe.setdefault(tk, set()).add(name)
-    if errors:
-        import sys
-
-        print("WARNING: failed to load some index lists:", file=sys.stderr)
-        for e in errors:
-            print(f"  - {e}", file=sys.stderr)
-    return universe
+    for filename, fn in fns.items():
+        tickers = fn()
+        (DATA_DIR / filename).write_text(json.dumps(tickers, indent=2) + "\n")
+        print(f"{filename}: {len(tickers)} tickers")
 
 
 if __name__ == "__main__":
-    u = get_universe()
-    print(f"Loaded {len(u)} unique tickers")
-    for name in ["S&P 500", "Nasdaq-100", "Dow 30", "TSX 60"]:
-        count = sum(1 for idx in u.values() if name in idx)
-        print(f"  {name}: {count}")
+    import sys
+
+    if "--refresh" in sys.argv:
+        refresh_all()
+    else:
+        u = get_universe()
+        print(f"Loaded {len(u)} unique tickers")
+        for name in INDEX_FILES:
+            count = sum(1 for idx in u.values() if name in idx)
+            print(f"  {name}: {count}")

@@ -1,18 +1,7 @@
 {
-  "BAM.TO": {
-    "date": "2026-08-14",
-    "type": "golden"
-  },
-  "BF-B": {
-    "date": "2026-08-14",
-    "type": "golden"
-  },
-  "DOW": {
-    "date": "2026-08-14",
-    "type": "death"
-  },
-  "GPC": {
-    "date": "2026-08-14",
-    "type": "golden"
-  }
+  "BAM.TO": {"date": "2026-08-14", "type": "golden"},
+  "BF-B": {"date": "2026-08-19", "type": "golden"},
+  "DOL.TO": {"date": "2026-08-19", "type": "golden"},
+  "DOW": {"date": "2026-08-14", "type": "death"},
+  "GPC": {"date": "2026-08-14", "type": "golden"}
 }
